@@ -21,6 +21,9 @@
 #include <nvs_flash.h>
 #include <esp_event.h>
 #include <driver/uart.h>
+#include <esp_wifi_types.h>
+#include <mdns.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "esp_wifi.h"
@@ -29,26 +32,32 @@
 #include "db_esp32_settings.h"
 #include "db_esp32_control.h"
 #include "globals.h"
+#include "tcp_server.h"
+#include "db_esp32_comm.h"
 
-static EventGroupHandle_t wifi_event_group;
+EventGroupHandle_t wifi_event_group;
 static const char *TAG = "DB_ESP32";
+#define DEFAULT_SSID "DroneBridge ESP32"
 
 volatile bool client_connected = false;
 volatile int client_connected_num = 0;
 char DEST_IP[15] = "192.168.2.2";
-volatile int SERIAL_PROTOCOL = 2;  // 1,2=MSP, 3,4,5=MAVLink/transparent
-int DB_UART_PIN_TX = GPIO_NUM_17;
-int DB_UART_PIN_RX = GPIO_NUM_16;
-int DB_UART_BAUD_RATE = 115200;
-int TRANSPARENT_BUF_SIZE = 64;
-int LTM_FRAME_NUM_BUFFER = 1;
-int MSP_LTM_TO_SAME_PORT = 0;
+uint8_t DEFAULT_PWD[64] = "dronebridge";
+uint8_t DEFAULT_CHANNEL = 6;
+uint8_t SERIAL_PROTOCOL = 2;  // 1,2=MSP, 3,4,5=MAVLink/transparent
+uint8_t DB_UART_PIN_TX = GPIO_NUM_17;
+uint8_t DB_UART_PIN_RX = GPIO_NUM_16;
+uint32_t DB_UART_BAUD_RATE = 115200;
+uint16_t TRANSPARENT_BUF_SIZE = 64;
+uint8_t LTM_FRAME_NUM_BUFFER = 1;
+uint8_t MSP_LTM_TO_SAME_PORT = 0;
 
 static esp_err_t event_handler(void *ctx, system_event_t *event)
 {
     switch (event->event_id) {
         case SYSTEM_EVENT_AP_START:
             ESP_LOGI(TAG, "Wifi AP started!");
+            xEventGroupSetBits(wifi_event_group, BIT2);
             break;
         case SYSTEM_EVENT_AP_STOP:
             ESP_LOGI(TAG, "Wifi AP stopped!");
@@ -71,6 +80,24 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
     return ESP_OK;
 }
 
+void start_mdns_service()
+{
+    xEventGroupWaitBits(wifi_event_group, BIT2, false, true, portMAX_DELAY);
+    //initialize mDNS service
+    esp_err_t err = mdns_init();
+    if (err) {
+        printf("MDNS Init failed: %d\n", err);
+        return;
+    }
+    mdns_hostname_set("dronebridge");
+    mdns_instance_name_set("DroneBridge for ESP32");
+
+    mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+    mdns_service_add(NULL, "_db_telem", "_udp", 1604, NULL, 0);
+    mdns_service_add(NULL, "_db_proxy", "_udp", 1607, NULL, 0);
+    mdns_service_instance_name_set("_http", "DroneBridge telemetry downlink", "DroneBridge bi-directional link");
+}
+
 
 void init_wifi(){
     wifi_event_group = xEventGroupCreate();
@@ -83,15 +110,15 @@ void init_wifi(){
     wifi_config_t ap_config = {
             .ap = {
                     .ssid = DEFAULT_SSID,
-                    .password = DEFAULT_PWD,
                     .ssid_len = 0,
                     .authmode = WIFI_AUTH_WPA_PSK,
                     .channel = DEFAULT_CHANNEL,
                     .ssid_hidden = 0,
                     .beacon_interval = 150,
-                    .max_connection = 1
+                    .max_connection = 2
             },
     };
+    xthal_memcpy(ap_config.ap.password, DEFAULT_PWD, 64);
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_protocol(ESP_IF_WIFI_AP, WIFI_PROTOCOL_11B));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
@@ -109,6 +136,32 @@ void init_wifi(){
 }
 
 
+void read_settings_nvs(){
+    nvs_handle my_handle;
+    if (nvs_open("settings", NVS_READONLY, &my_handle) == ESP_ERR_NVS_NOT_FOUND){
+        // First start
+        nvs_close(my_handle);
+        write_settings_to_nvs();
+    } else {
+        ESP_LOGI(TAG, "Reading settings from NVS");
+        size_t required_size = 0;
+        ESP_ERROR_CHECK(nvs_get_str(my_handle, "wifi_pass", NULL, &required_size));
+        char* wifi_pass = malloc(required_size);
+        ESP_ERROR_CHECK(nvs_get_str(my_handle, "wifi_pass", wifi_pass, &required_size));
+        memcpy(DEFAULT_PWD, wifi_pass, required_size);
+        ESP_ERROR_CHECK(nvs_get_u32(my_handle, "baud", &DB_UART_BAUD_RATE));
+        ESP_ERROR_CHECK(nvs_get_u8(my_handle, "gpio_tx", &DB_UART_PIN_TX));
+        ESP_ERROR_CHECK(nvs_get_u8(my_handle, "gpio_rx", &DB_UART_PIN_RX));
+        ESP_ERROR_CHECK(nvs_get_u8(my_handle, "proto", &SERIAL_PROTOCOL));
+        ESP_ERROR_CHECK(nvs_get_u16(my_handle, "trans_pack_size", &TRANSPARENT_BUF_SIZE));
+        ESP_ERROR_CHECK(nvs_get_u8(my_handle, "ltm_per_packet", &LTM_FRAME_NUM_BUFFER));
+        ESP_ERROR_CHECK(nvs_get_u8(my_handle, "msp_ltm_same", &MSP_LTM_TO_SAME_PORT));
+        nvs_close(my_handle);
+        free(wifi_pass);
+    }
+}
+
+
 void app_main()
 {
     esp_err_t ret = nvs_flash_init();
@@ -117,7 +170,11 @@ void app_main()
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-    esp_log_level_set("*", ESP_LOG_INFO);
+    read_settings_nvs();
+    esp_log_level_set("*", ESP_LOG_WARN);
     init_wifi();
+    start_mdns_service();
     control_module();
+    start_tcp_server();
+    communication_module();
 }

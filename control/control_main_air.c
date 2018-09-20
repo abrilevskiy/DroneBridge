@@ -36,6 +36,7 @@
 #include "../common/mavlink/c_library_v2/common/mavlink.h"
 #include "../common/msp_serial.h"
 #include "../common/ccolors.h"
+#include "../common/db_utils.h"
 
 
 #define ETHER_TYPE	    0x88ab
@@ -49,6 +50,8 @@ uint8_t buf[BUF_SIZ];
 uint8_t mavlink_telemetry_buf[2048] = {0}, mavlink_message_buf[256] = {0};
 uint8_t telemetry_seq_number = 0;
 int mav_tel_message_counter = 0, mav_tel_buf_length = 0;
+long double cpu_u_new[4], cpu_u_old[4], loadavg;
+float systemp, millideg;
 
 void intHandler(int dummy)
 {
@@ -91,6 +94,36 @@ void send_buffered_mavlink_tel(int length_message, mavlink_message_t *mav_messag
         mav_tel_message_counter = 0;
         mav_tel_buf_length = 0;
     }
+}
+
+/**
+ * Gets CPU usage on Linux systems. Needs to be called periodically. No one time calls!
+ * @return CPU load in %
+ */
+uint8_t get_cpu_usage(){
+    FILE *fp;
+    fp = fopen("/proc/stat","r");
+    if (fscanf(fp, "%*s %Lf %Lf %Lf %Lf", &cpu_u_new[0], &cpu_u_new[1], &cpu_u_new[2], &cpu_u_new[3]) < 4)
+        perror("DB_CONTROL_AIR: Could not read CPU usage\n");
+    fclose(fp);
+    loadavg = ((cpu_u_old[0] + cpu_u_old[1] + cpu_u_old[2]) - (cpu_u_new[0] + cpu_u_new[1] + cpu_u_new[2])) /
+              ((cpu_u_old[0]+cpu_u_old[1]+cpu_u_old[2]+cpu_u_old[3]) - (cpu_u_new[0]+cpu_u_new[1]+cpu_u_new[2]+cpu_u_new[3]))*100;
+    memcpy(cpu_u_old, cpu_u_new, sizeof(cpu_u_new));
+    return (uint8_t) loadavg;
+}
+
+/**
+ * Reads the CPU temperature from a Linux system
+ * @return CPU temperature in °C
+ */
+uint8_t get_cpu_temp(){
+    FILE *thermal;
+    thermal = fopen("/sys/class/thermal/thermal_zone0/temp","r");
+    if (fscanf(thermal,"%f",&millideg) < 1)
+        perror("DB_CONTROL_AIR: Could not read CPU temperature\n");
+    fclose(thermal);
+    systemp = millideg / 1000;
+    return (uint8_t) systemp;
 }
 
 int main(int argc, char *argv[])
@@ -157,9 +190,10 @@ int main(int argc, char *argv[])
                                "\n\t-v Protocol over serial port [1|2|3|4]:\n"
                                   "\t\t1 = MSPv1 [Betaflight/Cleanflight]\n"
                                   "\t\t2 = MSPv2 [iNAV] (default)\n"
-                                  "\t\t3 = MAVLink (RC unsupported)\n"
-                                  "\t\t4 = MAVLink v2 (RC unsupported)\n"
-                                  "\t\t5 = MAVLink (plain) pass through (-l <chunk size>)"
+                                  "\t\t3 = MAVLink v1 (RC unsupported)\n"
+                                  "\t\t4 = MAVLink v2\n"
+                                  "\t\t5 = MAVLink (plain) pass through (-l <chunk size>) - recommended with MAVLink, "
+                                  "FC needs to support MAVLink v2 for RC"
                                "\n\t-l only relevant with -v 5 option. Telemetry bytes per packet over long range "
                                "(default: %i)"
                                "\n\t-e [Y|N] enable/disable RC over SUMD. If disabled -v & -u options are used for RC."
@@ -177,10 +211,8 @@ int main(int argc, char *argv[])
                 abort ();
         }
     }
-    if (use_sumd == 'Y')
-        conf_rc_serial_protocol_air(5);
-    else
-        conf_rc_serial_protocol_air(serial_protocol_control);
+    conf_rc_serial_protocol_air(serial_protocol_control, use_sumd);
+    open_rc_rx_shm(); // open/init shared memory to write RC values into it
 // -------------------------------
 // Setting up network interface
 // -------------------------------
@@ -225,7 +257,6 @@ int main(int argc, char *argv[])
 // -------------------------------
 //    Setting up UART interface for RC commands over SUMD
 // -------------------------------
-    // TODO: needs debugging
     int socket_rc_serial = -1;
     if (use_sumd == 'Y'){
         do
@@ -276,7 +307,7 @@ int main(int argc, char *argv[])
     struct timeval timecheck;
 
     // create our data pointer directly inside the buffer (monitor_framebuffer) that is sent over the socket
-    struct data_rc_status_update *rc_status_update_data = (struct data_rc_status_update *)
+    struct uav_rc_status_update_message *rc_status_update_data = (struct uav_rc_status_update_message *)
             (monitor_framebuffer + RADIOTAP_LENGTH + DB_RAW_V2_HEADER_LENGTH);
     struct data_uni *data_uni_to_ground = (struct data_uni *)
             (monitor_framebuffer + RADIOTAP_LENGTH + DB_RAW_V2_HEADER_LENGTH);
@@ -338,7 +369,7 @@ int main(int argc, char *argv[])
                     }else{
                         rssi = buf[30];
                     }
-                    command_length = buf[buf[2]+7] | (buf[buf[2]+8] << 8); // ready for v2
+                    command_length = buf[buf[2] + 7] | (buf[buf[2] + 8] <<  8); // ready for v2
                     memcpy(commandBuf, &buf[buf[2] + DB_RAW_V2_HEADER_LENGTH], (size_t) command_length);
                     sentbytes = (int) write(socket_control_serial, commandBuf, (size_t) command_length); errsv = errno;
                     tcdrain(socket_control_serial);
@@ -431,7 +462,7 @@ int main(int argc, char *argv[])
         }
 
         // --------------------------------
-        // Send a status update to status module on groundstation
+        // Send a status update to status module on ground station
         // --------------------------------
         gettimeofday(&timecheck, NULL);
         rightnow = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
@@ -440,7 +471,10 @@ int main(int argc, char *argv[])
             rc_status_update_data->bytes[0] = rssi;
             // lost packets/second (it is a estimate)
             rc_status_update_data->bytes[1] = (int8_t) (lost_packet_count * ((double) 1000 / (rightnow - start)));
-            send_packet_hp( DB_PORT_STATUS, (u_int16_t) 6, update_seq_num(&status_seq_number));
+            rc_status_update_data->bytes[2] = get_cpu_usage();
+            rc_status_update_data->bytes[3] = get_cpu_temp();
+            rc_status_update_data->bytes[4] = get_undervolt();
+            send_packet_hp(DB_PORT_STATUS, (u_int16_t) 6, update_seq_num(&status_seq_number));
 
             lost_packet_count = 0;
             gettimeofday(&timecheck, NULL);

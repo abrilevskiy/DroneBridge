@@ -17,9 +17,18 @@
  *
  */
 
-#ifndef DRONEBRIDGE_DB_DEBUG_UTILS_H
-#define DRONEBRIDGE_DB_DEBUG_UTILS_H
+#ifndef DB_JOYSTIC_TEST_OPENTX_H
+#define DB_JOYSTIC_TEST_OPENTX_H
 
-void print_buffer(uint8_t buffer[], int num_bytes);
+#define JS_EVENT_BUTTON         0x01    /* button pressed/released */
+#define JS_EVENT_AXIS           0x02    /* joystick moved */
+#define JS_EVENT_INIT           0x80    /* initial state of device */
 
-#endif //DRONEBRIDGE_DB_DEBUG_UTILS_H
+#define MAX 32767
+
+#define DEFAULT_OPENTX_CALIBRATION "jscal -s 8,1,0,0,0,5534751,5534751,1,0,0,0,5534751,5534751,1,0,0,0,5534751,5534751,1,0,0,0,5534751,5534751,1,0,0,0,5534751,5534751,1,0,0,0,5534751,5534751,1,0,0,0,5534751,5534751,1,0,0,0,5534751,5534751 /dev/input/js0"
+#define taranis_descriptor           "FrSky FrSky Taranis Joystick"
+
+int opentx(int Joy_IF, char calibrate_comm[]);
+
+#endif //DB_JOYSTIC_TEST_OPENTX_H

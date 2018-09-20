@@ -20,8 +20,4 @@
 #ifndef DB_ESP32_DB_ESP32_SETTINGS_H
 #define DB_ESP32_DB_ESP32_SETTINGS_H
 
-#define DEFAULT_SSID "DroneBridge ESP32"
-#define DEFAULT_PWD "dronebridge"
-#define DEFAULT_CHANNEL 6
-
 #endif //DB_ESP32_DB_ESP32_SETTINGS_H

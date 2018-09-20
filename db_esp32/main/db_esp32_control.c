@@ -19,7 +19,8 @@
 
 #include <sys/fcntl.h>
 #include <sys/param.h>
-#include <sys/select.h>
+#include <config.h>
+#include <string.h>
 #include "esp_log.h"
 #include "lwip/sockets.h"
 #include "driver/uart.h"
@@ -186,6 +187,7 @@ void control_module_uart_parser(void *parameter){
                 break;
         }
     }
+    vTaskDelete(NULL);
 }
 
 void control_module_udp_server(void *parameter){
@@ -209,6 +211,7 @@ void control_module_udp_server(void *parameter){
             }
         }
     }
+    vTaskDelete(NULL);
 }
 
 /**
@@ -219,6 +222,8 @@ void control_module_udp_server(void *parameter){
  */
 void control_module(){
     bool setup_success = 1;
+    xEventGroupWaitBits(wifi_event_group, BIT2, false, true, portMAX_DELAY);
+
     if (open_udp_socket() == ESP_FAIL) setup_success = 0;
     if (open_serial_socket() == ESP_FAIL) setup_success = 0;
     if (setup_success){

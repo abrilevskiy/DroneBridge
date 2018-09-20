@@ -52,3 +52,11 @@ Makefile
 db_esp32/db_esp32\.cbp
 
 db_esp32/sdkconfig\.old
+
+communication/venv/
+
+*.cbp
+
+control/control_ground
+
+*.a

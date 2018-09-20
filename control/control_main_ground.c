@@ -30,13 +30,15 @@
 #include "i6S.h"
 #include "../common/db_raw_send_receive.h"
 #include "rc_ground.h"
+#include "../common/ccolors.h"
+#include "opentx.h"
 
 int detect_RC(int new_Joy_IF) {
     int fd;
     char interface_joystick[500];
     char path[] = "/dev/input/js";
     sprintf(interface_joystick, "%s%d", path, new_Joy_IF);
-    printf("DB_CONTROL_GROUND: Waiting for a RC to be detected on: %s\n", interface_joystick);
+    printf(YEL "DB_CONTROL_GROUND: Waiting for a RC to be detected on: %s" RESET "\n", interface_joystick);
     do {
         usleep(250000);
         fd = open(interface_joystick, O_RDONLY | O_NONBLOCK);
@@ -50,7 +52,7 @@ int main(int argc, char *argv[]) {
     char calibrate_comm[500];
     uint8_t comm_id;
     int Joy_IF, c, bitrate_op, rc_protocol;
-    char db_mode = 'm';
+    char db_mode = 'm'; char allow_rc_overwrite = 'N';
 
     // Command Line processing
     Joy_IF = JOY_INTERFACE;
@@ -60,7 +62,7 @@ int main(int argc, char *argv[]) {
     strcpy(calibrate_comm, DEFAULT_i6S_CALIBRATION);
     strcpy(ifName, DEFAULT_IF);
     opterr = 0;
-    while ((c = getopt(argc, argv, "n:j:m:b:g:v:c:")) != -1) {
+    while ((c = getopt(argc, argv, "n:j:m:b:g:v:o:c:")) != -1) {
         switch (c) {
             case 'n':
                 strncpy(ifName, optarg, IFNAMSIZ);
@@ -80,18 +82,23 @@ int main(int argc, char *argv[]) {
             case 'v':
                 rc_protocol = (int) strtol(optarg, NULL, 10);
                 break;
+            case 'o':
+                allow_rc_overwrite = *optarg;
+                break;
             case 'c':
                 comm_id = (uint8_t) strtol(optarg, NULL, 10);
                 break;
             case '?':
+                printf("12ch RC via the DB-RC option (-v 5)\n");
+                printf("14ch RC using FC serial protocol (-v 1|2|4)\n");
                 printf("Use following commandline arguments.\n");
                 printf("-n network interface for long range \n"
                                "-j number of joystick interface of RC \n"
-                               "-m mode: <w|m> for wifi or monitor\n"
-                               "-g a command to calibrate the joystick. Gets executed on initialisation\n"
-                               "-v Protocol [1|2|5]: 1 = MSPv1 [Betaflight/Cleanflight]; 2 = MSPv2 [iNAV]; "
-                               "3 = MAVLink (unsupported); 4 = MAVLink v2 (unsupported); 5 = DB-RC (default)\n"
-                               "-c <communication id> Choose a number from 0-255. Same on groundstation and drone!\n"
+                               "-m mode: [w|m] for wifi or monitor\n"
+                               "-v Protocol [1|2|4|5]: 1 = MSPv1 [Betaflight/Cleanflight]; 2 = MSPv2 [iNAV]; "
+                               "3 = MAVLink v1 (unsupported); 4 = MAVLink v2; 5 = DB-RC (default)\n"
+                               "-o [Y|N] enable/disable RC overwrite\n"
+                               "-c [communication id] Choose a number from 0-255. Same on groundstation and drone!\n"
                                "-b bitrate: \n\t1 = 2.5Mbit\n\t2 = 4.5Mbit\n\t3 = 6Mbit\n\t4 = 12Mbit (default)\n\t"
                                "5 = 18Mbit\n(bitrate option only supported with Ralink chipsets)\n");
                 return -1;
@@ -101,21 +108,25 @@ int main(int argc, char *argv[]) {
     }
 
     if (open_socket_send_receive(ifName, comm_id, db_mode, bitrate_op, DB_DIREC_DRONE, DB_PORT_CONTROLLER) < 0) {
-        printf("DB_CONTROL_GROUND: Could not open socket\n");
+        printf(RED "DB_CONTROL_GROUND: Could not open socket " RESET "\n");
         exit(-1);
     }
-    conf_rc_protocol(rc_protocol);
-    open_rc_tx_shm();
+    conf_rc(rc_protocol, allow_rc_overwrite);
+    open_rc_shm();
 
     int sock_fd = detect_RC(Joy_IF);
     if (ioctl(sock_fd, JSIOCGNAME(sizeof(RC_name)), RC_name) < 0)
         strncpy(RC_name, "Unknown", sizeof(RC_name));
     close(sock_fd); // We reopen in the RC specific file. Only opened in here to get the name of the controller
+    printf(GRN "DB_CONTROL_GROUND: Detected \"%s\"" RESET "\n", RC_name);
     if (strcmp(i6S_descriptor, RC_name) == 0){
         printf("DB_CONTROL_GROUND: Choosing i6S-Config\n");
+        strcpy(calibrate_comm, DEFAULT_i6S_CALIBRATION);
         i6S(Joy_IF, calibrate_comm);
     } else {
-        printf("DB_CONTROL_GROUND: Your RC \"%s\" is currently not supported. Closing.\n", RC_name);
+        printf("DB_CONTROL_GROUND: Choosing OpenTX-Config\n");
+        strcpy(calibrate_comm, DEFAULT_OPENTX_CALIBRATION);
+        opentx(Joy_IF, calibrate_comm);
     }
     return 0;
 }
